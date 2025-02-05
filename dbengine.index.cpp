@@ -291,7 +291,7 @@ bool DBEngine::setIndexEntry(uint32_t globalIndex, const IndexEntry& entry) {
 //   are then flushed and the global index count is updated.
 //
 bool DBEngine::splitPageAndInsert(uint32_t targetPage, uint32_t offsetInPage,
-    uint32_t key, uint32_t recordOffset, uint8_t status) {
+    uint32_t key, uint32_t recordOffset, uint8_t status, uint8_t internal_status) {
     SCOPE_TIMER("DBEngine::splitPageAndInsert");
     DEBUG_PRINT("splitPageAndInsert: Splitting page %u at offset %u for new key=%u\n", targetPage, offsetInPage, key);
 
@@ -310,6 +310,7 @@ bool DBEngine::splitPageAndInsert(uint32_t targetPage, uint32_t offsetInPage,
         _indexPage[offsetInPage].key = key;
         _indexPage[offsetInPage].offset = recordOffset;
         _indexPage[offsetInPage].status = status;
+        _indexPage[offsetInPage].internal_status = internal_status;
     }
     else {
         uint32_t newOffset = offsetInPage - splitIndex;
@@ -320,6 +321,7 @@ bool DBEngine::splitPageAndInsert(uint32_t targetPage, uint32_t offsetInPage,
         newPageBuffer[newOffset].key = key;
         newPageBuffer[newOffset].offset = recordOffset;
         newPageBuffer[newOffset].status = status;
+        newPageBuffer[newOffset].internal_status = internal_status;
     }
 
     // Update the global index count.
@@ -364,9 +366,11 @@ bool DBEngine::splitPageAndInsert(uint32_t targetPage, uint32_t offsetInPage,
 }
 
 
-bool DBEngine::insertIndexEntry(uint32_t key, uint32_t offset, uint8_t status) {
+
+bool DBEngine::insertIndexEntry(uint32_t key, uint32_t offset, uint8_t status, uint8_t internal_status) {
     SCOPE_TIMER("DBEngine::insertIndexEntry");
-    DEBUG_PRINT("insertIndexEntry: Inserting new entry with key=%u, offset=%u, status=%u\n", key, offset, status);
+    DEBUG_PRINT("insertIndexEntry: Inserting new entry with key=%u, offset=%u, status=%u, internal_status=%u\n",
+        key, offset, status, internal_status);
 
     // Use binary search to find the global insertion position.
     uint32_t low = 0, high = _indexCount;
@@ -391,11 +395,9 @@ bool DBEngine::insertIndexEntry(uint32_t key, uint32_t offset, uint8_t status) {
             return false;
         if (entry.key == key) {
             DEBUG_PRINT("insertIndexEntry: Duplicate key detected (key=%u at index %u).\n", key, pos);
-            // Return false or an error code to signal the collision.
             return false;
         }
     }
-    // Alternatively, if _indexCount > 0 and pos > 0, you may also want to check the previous entry:
     if (pos > 0) {
         IndexEntry prevEntry;
         if (!getIndexEntry(pos - 1, prevEntry))
@@ -425,13 +427,14 @@ bool DBEngine::insertIndexEntry(uint32_t key, uint32_t offset, uint8_t status) {
         size_t numToShift = entriesInPage - offsetInPage;
         if (numToShift > 0) {
             memmove(&_indexPage[offsetInPage + 1],
-                    &_indexPage[offsetInPage],
-                    numToShift * sizeof(IndexEntry));
+                &_indexPage[offsetInPage],
+                numToShift * sizeof(IndexEntry));
         }
         // Insert the new entry.
         _indexPage[offsetInPage].key = key;
         _indexPage[offsetInPage].offset = offset;
         _indexPage[offsetInPage].status = status;
+        _indexPage[offsetInPage].internal_status = internal_status;
         _indexCount++;
         _pageDirty = true;
         // If after insertion the page becomes full, flush it.
@@ -442,13 +445,14 @@ bool DBEngine::insertIndexEntry(uint32_t key, uint32_t offset, uint8_t status) {
     }
     else {
         // The target page is full: perform a page split and insert the new entry.
-        if (!splitPageAndInsert(targetPage, offsetInPage, key, offset, status))
+        if (!splitPageAndInsert(targetPage, offsetInPage, key, offset, status, internal_status))
             return false;
     }
 
     DEBUG_PRINT("insertIndexEntry: New entry inserted at global position %u\n", pos);
     return true;
 }
+
 
 
 //

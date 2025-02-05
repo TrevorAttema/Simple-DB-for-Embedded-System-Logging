@@ -14,6 +14,9 @@
 #define DB_VERSION          0x0001
 #define DB_IDX_VERSION      0x0001
 
+// Define a constant for the deletion flag in the internal status.
+#define INTERNAL_STATUS_DELETED 0x01
+
 // Define a macro to wrap a ScopedTimer creation.
 // Usage: SCOPE_TIMER("functionName");
 #define SCOPE_TIMER(name) ScopedTimer timer(name)
@@ -47,23 +50,28 @@ struct DBIndexHeader {
 //
 // --- Log Entry Header ---
 // Represents metadata for a log entry in the database.
+// Note: The user-controlled field "status" is preserved, and we add an
+// additional "internal_status" field for internal bookkeeping (e.g., deletion).
 #pragma pack(push, 1)
 struct LogEntryHeader {
-    uint8_t  recordType;   // Identifier for the record type
-    uint16_t length;       // Payload length in bytes
-    uint32_t key;          // Key value supplied by the caller
-    uint8_t  status;       // Implementation-specific status
+    uint8_t  recordType;      // Identifier for the record type
+    uint16_t length;          // Payload length in bytes
+    uint32_t key;             // Key value supplied by the caller
+    uint8_t  status;          // User-supplied status (untouched internally)
+    uint8_t  internal_status; // Internal status (e.g., deletion flag)
 };
 #pragma pack(pop)
 
 //
 // --- Index Entry ---
 // Represents an entry in the index file, linking keys to their offsets in the log file.
+// Similarly, we add an "internal_status" field for internal management.
 #pragma pack(push, 1)
 struct IndexEntry {
-    uint32_t key;      // Record's key value
-    uint32_t offset;   // File offset in the log file
-    uint8_t  status;   // Record status
+    uint32_t key;             // Record's key value
+    uint32_t offset;          // File offset in the log file
+    uint8_t  status;          // User-supplied status (untouched internally)
+    uint8_t  internal_status; // Internal status (e.g., deletion flag)
 };
 #pragma pack(pop)
 
@@ -158,7 +166,7 @@ public:
      * @param key The key of the record to mark as deleted.
      * @return True if the record was successfully marked deleted, false otherwise.
      */
-    //bool deleteRecord(uint32_t key);
+    bool deleteRecord(uint32_t key);
 
     /**
      * @brief Returns the database file format version.
@@ -170,6 +178,7 @@ public:
     bool locateKey(uint32_t key, uint32_t* index);
     bool nextKey(uint32_t currentIndex, uint32_t* nextIndex);
     bool prevKey(uint32_t currentIndex, uint32_t* prevIndex);
+    bool searchIndex(uint32_t key, uint32_t* foundIndex) const;
 
     void printStats(void) const;
 
@@ -194,11 +203,11 @@ private:
     bool setIndexEntry(uint32_t globalIndex, const IndexEntry& entry);
     bool saveIndexHeader(void);
     bool loadIndexHeader(void);
-    bool searchIndex(uint32_t key, uint32_t* foundIndex) const;
+    
     bool findIndexEntry(uint32_t key, uint32_t& offset) const;
-    bool insertIndexEntry(uint32_t key, uint32_t offset, uint8_t status);
+    bool insertIndexEntry(uint32_t key, uint32_t offset, uint8_t status, uint8_t internal_status);
     bool splitPageAndInsert(uint32_t targetPage, uint32_t offsetInPage,
-        uint32_t key, uint32_t recordOffset, uint8_t status);
+        uint32_t key, uint32_t recordOffset, uint8_t status, uint8_t internal_status);
     bool validateIndex(void);
 
     // --- Database Header Functions for the Index File ---

@@ -37,12 +37,24 @@ DBEngine::DBEngine(IFileHandler& logHandler, IFileHandler& indexHandler)
 // Appends a new record to the log file and creates an index entry.
 bool DBEngine::append(uint32_t key, uint8_t recordType, const void* record, uint16_t recordSize) {
     size_t bytesWritten = 0;
+    uint32_t foundIndex;
+    bool reuseEntry = false;
 
     // Check for key collision in the index.
-    uint32_t dummyIndex;
-    if (searchIndex(key, &dummyIndex)) {
-        DEBUG_PRINT("append: Duplicate key detected (key=%u). Aborting append.\n", key);
-        return false;
+    if (searchIndex(key, &foundIndex)) {
+        // Retrieve the existing index entry.
+        IndexEntry existing;
+        if (!getIndexEntry(foundIndex, existing))
+            return false;
+
+        // If the record is live (internal_status is not marked deleted), then abort.
+        if ((existing.internal_status & INTERNAL_STATUS_DELETED) == 0) {
+            DEBUG_PRINT("append: Duplicate live key detected (key=%u). Aborting append.\n", key);
+            return false;
+        }
+        // Otherwise, if the record is marked deleted, we will reuse its index entry.
+        DEBUG_PRINT("append: Reusing deleted index entry for key=%u at index %u.\n", key, foundIndex);
+        reuseEntry = true;
     }
 
     // Open log file in read/write mode; if it does not exist, create it and write a DBHeader.
@@ -72,7 +84,8 @@ bool DBEngine::append(uint32_t key, uint8_t recordType, const void* record, uint
     header.recordType = recordType;
     header.length = recordSize;
     header.key = key;
-    header.status = 0; // Default status.
+    header.status = 0;             // User-supplied status remains as provided.
+    header.internal_status = 0;    // Clear internal status (i.e. record is live).
 
     // Write the log entry header.
     if (!_logHandler.write(reinterpret_cast<const uint8_t*>(&header), sizeof(header), bytesWritten) ||
@@ -89,15 +102,29 @@ bool DBEngine::append(uint32_t key, uint8_t recordType, const void* record, uint
     }
     _logHandler.close();
 
-    // Insert the index entry using the key and offset.
-    if (!insertIndexEntry(header.key, offset, header.status)) {
-        DEBUG_PRINT("append: Failed to insert index entry (possible collision).\n");
-        return false;
+    // If a duplicate (deleted) record was found, update its index entry.
+    if (reuseEntry) {
+        IndexEntry entry;
+        if (!getIndexEntry(foundIndex, entry))
+            return false;
+        // Update the index entry with the new record offset and clear the deletion flag.
+        entry.offset = offset;
+        // Leave the user status as is.
+        entry.internal_status = 0;  // Mark record as live.
+        if (!setIndexEntry(foundIndex, entry))
+            return false;
+        DEBUG_PRINT("append: Updated index entry for key=%u at index %u.\n", key, foundIndex);
+    }
+    else {
+        // Insert a new index entry. We now pass both the user status and internal status.
+        if (!insertIndexEntry(header.key, offset, header.status, header.internal_status)) {
+            DEBUG_PRINT("append: Failed to insert index entry (unexpected collision) for key=%u.\n", key);
+            return false;
+        }
     }
 
     return true;
 }
-
 
 bool DBEngine::updateStatus(uint32_t indexId, uint8_t newStatus) {
     if (indexId >= _indexCount) {
@@ -174,6 +201,57 @@ bool DBEngine::get(uint32_t key, void* payloadBuffer, uint16_t bufferSize, uint1
 
     if (outRecordSize)
         *outRecordSize = localHeader.length;
+    return true;
+}
+
+bool DBEngine::deleteRecord(uint32_t key) {
+    uint32_t index;
+    // Find the record by key.
+    if (!searchIndex(key, &index)) {
+        DEBUG_PRINT("deleteRecord: Key %u not found in index.\n", key);
+        return false;
+    }
+
+    IndexEntry entry;
+    if (!getIndexEntry(index, entry))
+        return false;
+
+    // If already deleted, nothing to do.
+    if (entry.internal_status & INTERNAL_STATUS_DELETED) {
+        DEBUG_PRINT("deleteRecord: Key %u already marked as deleted.\n", key);
+        return true;
+    }
+
+    // Set the deletion flag in the internal status.
+    uint8_t newInternalStatus = entry.internal_status | INTERNAL_STATUS_DELETED;
+
+    // Update the log file.
+    // Compute offset to the internal_status field:
+    // Offset is: record offset + sizeof(recordType) + sizeof(length) + sizeof(key) + sizeof(user status)
+    uint32_t recordOffset = entry.offset;
+    uint32_t internalStatusFieldOffset = recordOffset +
+        sizeof(uint8_t) + sizeof(uint16_t) + sizeof(uint32_t) + sizeof(uint8_t);
+
+    if (!_logHandler.open(_logFileName, "rb+"))
+        return false;
+    if (!_logHandler.seek(internalStatusFieldOffset)) {
+        _logHandler.close();
+        return false;
+    }
+    size_t bytesWritten = 0;
+    if (!_logHandler.write(reinterpret_cast<const uint8_t*>(&newInternalStatus), sizeof(newInternalStatus), bytesWritten) ||
+        bytesWritten != sizeof(newInternalStatus)) {
+        _logHandler.close();
+        return false;
+    }
+    _logHandler.close();
+
+    // Update the index entry's internal_status.
+    entry.internal_status = newInternalStatus;
+    if (!setIndexEntry(index, entry))
+        return false;
+
+    DEBUG_PRINT("deleteRecord: Key %u marked as deleted (internal_status updated).\n", key);
     return true;
 }
 
