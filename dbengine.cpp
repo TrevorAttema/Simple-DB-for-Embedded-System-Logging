@@ -29,78 +29,69 @@ DBEngine::DBEngine(IFileHandler& logHandler, IFileHandler& indexHandler)
     _indexFileName[0] = '\0';
 }
 
-void DBEngine::dbOpen(const char logFileName[MAX_FILENAME_LENGTH],
-    const char indexFileName[MAX_FILENAME_LENGTH])
-{
-    strncpy(_logFileName, logFileName, MAX_FILENAME_LENGTH - 1);
-    _logFileName[MAX_FILENAME_LENGTH - 1] = '\0';
-    strncpy(_indexFileName, indexFileName, MAX_FILENAME_LENGTH - 1);
-    _indexFileName[MAX_FILENAME_LENGTH - 1] = '\0';
-    _indexCount = 0;
-    _pageLoaded = false;
-    _pageDirty = false;
-    _currentPageNumber = 0;
-}
-
 // ---------------------------------------------------------------------------
 // Record Handling Functions
 // ---------------------------------------------------------------------------
 
 // --- dbAppendRecord ---
 // Appends a new record to the log file and creates an index entry.
-bool DBEngine::dbAppendRecord(uint8_t recordType, const void* record, uint16_t recordSize) {
+bool DBEngine::append(uint32_t key, uint8_t recordType, const void* record, uint16_t recordSize) {
     size_t bytesWritten = 0;
-
-    // Generate a new key.
-    uint32_t key = getMillis();  // Use current time (in millis) as key.
 
     // Check for key collision in the index.
     uint32_t dummyIndex;
     if (searchIndex(key, &dummyIndex)) {
-        DEBUG_PRINT("dbAppendRecord: Duplicate key detected (key=%u). Aborting append.\n", key);
-        return false;  // Collision found: do not append the record.
+        DEBUG_PRINT("append: Duplicate key detected (key=%u). Aborting append.\n", key);
+        return false;
     }
 
-    // Open log file in read/write mode. If the file does not exist, create it.
+    // Open log file in read/write mode; if it does not exist, create it and write a DBHeader.
     if (!_logHandler.open(_logFileName, "r+b")) {
-        // If opening in read/write fails, try to create the file.
         if (!_logHandler.open(_logFileName, "wb+"))
             return false;
+        // New file: write log header.
+        DBHeader logHeader;
+        logHeader.magic = DB_MAGIC_NUMBER;
+        logHeader.version = DB_VERSION;
+        if (!_logHandler.write(reinterpret_cast<const uint8_t*>(&logHeader), sizeof(logHeader), bytesWritten) ||
+            bytesWritten != sizeof(logHeader)) {
+            _logHandler.close();
+            return false;
+        }
     }
 
-    // Seek to the end to get the current file size (the offset).
-    if (!_logHandler.seekToEnd()) {  // You may need to implement this in your IFileHandler.
+    // Seek to the end of the log file to obtain the record offset.
+    if (!_logHandler.seekToEnd()) {
         _logHandler.close();
         return false;
     }
     uint32_t offset = _logHandler.tell();
 
-    // Build the header with the new record information.
+    // Build the log entry header with the caller-supplied key.
     LogEntryHeader header;
     header.recordType = recordType;
     header.length = recordSize;
-    header.key = key;      // Use the key we generated (and already verified).
-    header.status = 0;     // Default status.
+    header.key = key;
+    header.status = 0; // Default status.
 
-    // Write the header.
-    if (!_logHandler.write((const uint8_t*)&header, sizeof(header), bytesWritten) ||
+    // Write the log entry header.
+    if (!_logHandler.write(reinterpret_cast<const uint8_t*>(&header), sizeof(header), bytesWritten) ||
         bytesWritten != sizeof(header)) {
         _logHandler.close();
         return false;
     }
 
-    // Write the actual record data.
-    if (!_logHandler.write((const uint8_t*)record, recordSize, bytesWritten) ||
+    // Write the record data.
+    if (!_logHandler.write(reinterpret_cast<const uint8_t*>(record), recordSize, bytesWritten) ||
         bytesWritten != recordSize) {
         _logHandler.close();
         return false;
     }
     _logHandler.close();
 
-    // Insert the index entry.
-    // Note: insertIndexEntry() should also check for collisions and fail if one exists.
+    // Insert the index entry using the key and offset.
     if (!insertIndexEntry(header.key, offset, header.status)) {
-        DEBUG_PRINT("dbAppendRecord: Failed to insert index entry (possible collision).\n");
+        DEBUG_PRINT("append: Failed to insert index entry (possible collision).\n");
         return false;
     }
 
@@ -108,88 +99,54 @@ bool DBEngine::dbAppendRecord(uint8_t recordType, const void* record, uint16_t r
 }
 
 
-
-// --- dbUpdateRecordStatus ---
-// Updates the status field in the log file and in the corresponding index entry.
-// --- dbUpdateRecordStatus ---
-// Updates the status field in the log file and in the corresponding index entry,
-// using the index ID to locate the record.
-bool DBEngine::dbUpdateRecordStatusByIndexId(uint32_t indexId, uint8_t newStatus) {
-    // Validate the index ID.
+bool DBEngine::updateStatus(uint32_t indexId, uint8_t newStatus) {
     if (indexId >= _indexCount) {
-        DEBUG_PRINT("dbUpdateRecordStatus: Invalid indexId %u (max %u).\n", indexId, _indexCount);
+        DEBUG_PRINT("updateStatus: Invalid indexId %u (max %u).\n", indexId, _indexCount);
         return false;
     }
 
-    // Retrieve the index entry using the index ID.
-    IndexEntry entry;
-    if (!getIndexEntry(indexId, entry)) {
-        DEBUG_PRINT("dbUpdateRecordStatus: Failed to get index entry for indexId %u.\n", indexId);
-        return false;
-    }
-
-    // Get the offset of the log record from the index entry.
-    uint32_t recordOffset = entry.offset;
-
-    // Open the log file in read-write mode.
-    if (!_logHandler.open(_logFileName, "rb+")) {
-        DEBUG_PRINT("dbUpdateRecordStatus: Failed to open log file %s.\n", _logFileName);
-        return false;
-    }
-
-    // Calculate the offset of the status field.
-    // The LogEntryHeader layout is:
-    //   uint8_t  recordType;   // 1 byte
-    //   uint16_t length;       // 2 bytes
-    //   uint32_t key;          // 4 bytes
-    //   uint8_t  status;       // 1 byte (this field)
-    //
-    // We calculate the status field offset as:
-    //   recordOffset + sizeof(recordType) + sizeof(length) + sizeof(key)
-    uint32_t statusFieldOffset = recordOffset
-        + sizeof(uint8_t)    // recordType
-        + sizeof(uint16_t)   // length
-        + sizeof(uint32_t);  // key
-
-    if (!_logHandler.seek(statusFieldOffset)) {
-        DEBUG_PRINT("dbUpdateRecordStatus: Seek to offset %u failed.\n", statusFieldOffset);
-        _logHandler.close();
-        return false;
-    }
-
-    // Write the new status value.
-    size_t bytesWritten = 0;
-    if (!_logHandler.write(reinterpret_cast<const uint8_t*>(&newStatus),
-        sizeof(newStatus), bytesWritten) ||
-        bytesWritten != sizeof(newStatus)) {
-        DEBUG_PRINT("dbUpdateRecordStatus: Write of newStatus failed (wrote %zu bytes).\n", bytesWritten);
-        _logHandler.close();
-        return false;
-    }
-    _logHandler.close();
-
-    // Update the status in the index entry.
-    entry.status = newStatus;
-    if (!setIndexEntry(indexId, entry)) {
-        DEBUG_PRINT("dbUpdateRecordStatus: Failed to update index entry for indexId %u.\n", indexId);
-        return false;
-    }
-
-    DEBUG_PRINT("dbUpdateRecordStatus: Successfully updated status for indexId %u.\n", indexId);
-    return true;
-}
-
-// --- dbGetRecordByIndexId ---
-// Retrieves a record from the log file given its index ID.
-bool DBEngine::dbGetRecordByIndexId(uint32_t indexId, LogEntryHeader& header,
-    void* payloadBuffer, uint16_t bufferSize)
-{
-    if (indexId >= _indexCount)
-        return false;
     IndexEntry entry;
     if (!getIndexEntry(indexId, entry))
         return false;
-    uint32_t offset = entry.offset;
+
+    uint32_t recordOffset = entry.offset;
+
+    if (!_logHandler.open(_logFileName, "rb+"))
+        return false;
+
+    // Compute offset to the status field:
+    // offset + sizeof(recordType) + sizeof(length) + sizeof(key)
+    uint32_t statusFieldOffset = recordOffset + sizeof(uint8_t) + sizeof(uint16_t) + sizeof(uint32_t);
+
+    if (!_logHandler.seek(statusFieldOffset)) {
+        _logHandler.close();
+        return false;
+    }
+
+    size_t bytesWritten = 0;
+    if (!_logHandler.write(reinterpret_cast<const uint8_t*>(&newStatus), sizeof(newStatus), bytesWritten) ||
+        bytesWritten != sizeof(newStatus)) {
+        _logHandler.close();
+        return false;
+    }
+    _logHandler.close();
+
+    // Update the index entry status.
+    entry.status = newStatus;
+    if (!setIndexEntry(indexId, entry))
+        return false;
+
+    return true;
+}
+
+
+// --- dbGetRecordByKey ---
+// Retrieves a record by searching the index for the given key.
+bool DBEngine::get(uint32_t key, void* payloadBuffer, uint16_t bufferSize, uint16_t* outRecordSize) {
+    uint32_t offset = 0;
+    if (!findIndexEntry(key, offset))
+        return false;
+
     size_t bytesRead = 0;
     if (!_logHandler.open(_logFileName, "rb"))
         return false;
@@ -197,17 +154,47 @@ bool DBEngine::dbGetRecordByIndexId(uint32_t indexId, LogEntryHeader& header,
         _logHandler.close();
         return false;
     }
-    if (!_logHandler.read((uint8_t*)&header, sizeof(header), bytesRead) ||
-        bytesRead != sizeof(header)) {
+
+    LogEntryHeader localHeader;
+    if (!_logHandler.read(reinterpret_cast<uint8_t*>(&localHeader), sizeof(localHeader), bytesRead) ||
+        bytesRead != sizeof(localHeader)) {
         _logHandler.close();
         return false;
     }
-    if (header.length > bufferSize) {
+    if (localHeader.length > bufferSize) {
         _logHandler.close();
         return false;
     }
-    if (!_logHandler.read((uint8_t*)payloadBuffer, header.length, bytesRead) ||
-        bytesRead != header.length) {
+    if (!_logHandler.read(reinterpret_cast<uint8_t*>(payloadBuffer), localHeader.length, bytesRead) ||
+        bytesRead != localHeader.length) {
+        _logHandler.close();
+        return false;
+    }
+    _logHandler.close();
+
+    if (outRecordSize)
+        *outRecordSize = localHeader.length;
+    return true;
+}
+
+bool DBEngine::saveDBHeader(void) {
+    DBHeader header;
+    header.magic = DB_MAGIC_NUMBER;   // "LOGS"
+    header.version = DB_VERSION;       // Use the DB_VERSION constant (0x0001)
+
+    // Open the log file in a mode that allows writing at the beginning.
+    if (!_logHandler.open(_logFileName, "rb+")) {
+        // Try creating a new file if it doesn't exist.
+        if (!_logHandler.open(_logFileName, "wb+"))
+            return false;
+    }
+    if (!_logHandler.seek(0)) {
+        _logHandler.close();
+        return false;
+    }
+    size_t bytesWritten = 0;
+    if (!_logHandler.write(reinterpret_cast<const uint8_t*>(&header), sizeof(header), bytesWritten) ||
+        bytesWritten != sizeof(header)) {
         _logHandler.close();
         return false;
     }
@@ -215,35 +202,123 @@ bool DBEngine::dbGetRecordByIndexId(uint32_t indexId, LogEntryHeader& header,
     return true;
 }
 
-// --- dbGetRecordByKey ---
-// Retrieves a record by searching the index for the given key.
-bool DBEngine::dbGetRecordByKey(uint32_t key, LogEntryHeader& header,
-    void* payloadBuffer, uint16_t bufferSize)
-{
-    uint32_t offset = 0;
-    if (!findIndexEntry(key, offset))
-        return false;
+
+bool DBEngine::loadDBHeader(void) {
+    DBHeader header;
     size_t bytesRead = 0;
-    if (!_logHandler.open(_logFileName, "rb"))
-        return false;
-    if (!_logHandler.seek(offset)) {
-        _logHandler.close();
+    if (!_logHandler.open(_logFileName, "rb")) {
+        DEBUG_PRINT("loadDBHeader: Could not open log file %s.\n", _logFileName);
         return false;
     }
-    if (!_logHandler.read((uint8_t*)&header, sizeof(header), bytesRead) ||
+    if (!_logHandler.read(reinterpret_cast<uint8_t*>(&header), sizeof(header), bytesRead) ||
         bytesRead != sizeof(header)) {
-        _logHandler.close();
-        return false;
-    }
-    if (header.length > bufferSize) {
-        _logHandler.close();
-        return false;
-    }
-    if (!_logHandler.read((uint8_t*)payloadBuffer, header.length, bytesRead) ||
-        bytesRead != header.length) {
+        DEBUG_PRINT("loadDBHeader: Failed to read header from log file.\n");
         _logHandler.close();
         return false;
     }
     _logHandler.close();
+
+    // Validate the header.
+    if (header.magic != DB_MAGIC_NUMBER) {
+        DEBUG_PRINT("loadDBHeader: Invalid magic number in log file.\n");
+        return false;
+    }
+    if (header.version != DB_VERSION) {
+        DEBUG_PRINT("loadDBHeader: Unsupported version %u in log file.\n", header.version);
+        return false;
+    }
+
+    // Save the header internally.
+    _dbHeader = header;
     return true;
 }
+
+bool DBEngine::open(const char logFileName[MAX_FILENAME_LENGTH],
+    const char indexFileName[MAX_FILENAME_LENGTH])
+{
+    // Copy file names as before.
+    strncpy(_logFileName, logFileName, MAX_FILENAME_LENGTH - 1);
+    _logFileName[MAX_FILENAME_LENGTH - 1] = '\0';
+    strncpy(_indexFileName, indexFileName, MAX_FILENAME_LENGTH - 1);
+    _indexFileName[MAX_FILENAME_LENGTH - 1] = '\0';
+
+    // Reset internal variables.
+    _indexCount = 0;
+    _pageLoaded = false;
+    _pageDirty = false;
+    _currentPageNumber = 0;
+
+    // Attempt to load and validate the DB header.
+    if (!loadDBHeader()) {
+        DEBUG_PRINT("dbOpenAndLoad: No valid header found. Creating new database file.\n");
+        // Create a new file by saving the header.
+        if (!saveDBHeader()) {
+            DEBUG_PRINT("dbOpenAndLoad: Failed to create a new DB header.\n");
+            return false;
+        }
+    }
+
+    // Now load the in-memory index from the index file.
+    if (!loadIndex()) {
+        DEBUG_PRINT("open: Failed to load in-memory index.\n");
+        return false;
+    }
+
+    // Optionally, you might also load the first index page or perform other initialization.
+    return true;
+}
+
+#include <stdio.h>  // For printf
+
+// Prints database statistics: number of records, pages, records per page, and unique keys.
+void DBEngine::printStats(void) const {
+    // _indexCount should have been set when loading the index header from disk.
+    uint32_t totalRecords = _indexCount;
+    // Each in-memory index page holds MAX_INDEX_ENTRIES entries.
+    uint32_t totalPages = (totalRecords + MAX_INDEX_ENTRIES - 1) / MAX_INDEX_ENTRIES;
+
+    printf("Database Statistics:\n");
+    printf("  Total records: %u\n", totalRecords);
+    printf("  Total pages: %u\n", totalPages);
+
+    // Print the number of entries on each page.
+    for (uint32_t page = 0; page < totalPages; page++) {
+        uint32_t start = page * MAX_INDEX_ENTRIES;
+        uint32_t end = start + MAX_INDEX_ENTRIES;
+        if (end > totalRecords)
+            end = totalRecords;
+        uint32_t countOnPage = end - start;
+        //printf("    Page %u: %u entries\n", page, countOnPage);
+    }
+
+    // Count unique keys by scanning all pages.
+    // Since this function is const but we need to load pages,
+    // we use const_cast to temporarily call non-const loadIndexPage().
+    DBEngine* self = const_cast<DBEngine*>(this);
+    uint32_t uniqueCount = 0;
+    uint32_t lastKey = 0;
+    bool first = true;
+
+    for (uint32_t page = 0; page < totalPages; page++) {
+        //printf("printStats: Loading page %u for unique key count...\n", page);
+        if (!self->loadIndexPage(page)) {
+           // printf("printStats: Error loading page %u\n", page);
+            continue;
+        }
+        // Determine number of entries on this page.
+        uint32_t start = page * MAX_INDEX_ENTRIES;
+        uint32_t countInPage = (page == totalPages - 1) ? (totalRecords - start) : MAX_INDEX_ENTRIES;
+        for (uint32_t i = 0; i < countInPage; i++) {
+            uint32_t key = self->_indexPage[i].key;
+            if (first || key != lastKey) {
+                uniqueCount++;
+                lastKey = key;
+                first = false;
+            }
+        }
+    }
+    printf("  Unique keys: %u\n", uniqueCount);
+}
+
+
+

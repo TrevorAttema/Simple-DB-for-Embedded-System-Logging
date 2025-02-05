@@ -46,11 +46,16 @@ bool DBEngine::validateIndex(void) {
 //
 bool DBEngine::saveIndexHeader(void) {
     SCOPE_TIMER("DBEngine::saveIndexHeader");
+    DBIndexHeader header;
+    header.magic = DB_MAGIC_NUMBER;     // Example magic number.
+    header.version = DB_IDX_VERSION;                 // Current version.
+    header.indexCount = _indexCount;    // Include the current index count.
+
     size_t bytesWritten = 0;
     DEBUG_PRINT("saveIndexHeader: Opening file %s for update...\n", _indexFileName);
     if (!_indexHandler.open(_indexFileName, "rb+")) {
-        DEBUG_PRINT("saveIndexHeader: File not openable in rb+ mode, trying wb mode.\n");
-        if (!_indexHandler.open(_indexFileName, "wb"))
+        DEBUG_PRINT("saveIndexHeader: File not openable in rb+ mode, trying wb+ mode.\n");
+        if (!_indexHandler.open(_indexFileName, "wb+"))
             return false;
     }
     if (!_indexHandler.seek(0)) {
@@ -58,10 +63,10 @@ bool DBEngine::saveIndexHeader(void) {
         _indexHandler.close();
         return false;
     }
-    DEBUG_PRINT("saveIndexHeader: Writing _indexCount = %u bytes at offset 0...\n", _indexCount);
-    if (!_indexHandler.write((const uint8_t*)&_indexCount, sizeof(_indexCount), bytesWritten) ||
-        bytesWritten != sizeof(_indexCount)) {
-        DEBUG_PRINT("saveIndexHeader: Write failed (wrote %zu bytes, expected %zu).\n", bytesWritten, sizeof(_indexCount));
+    DEBUG_PRINT("saveIndexHeader: Writing DBIndexHeader (size = %zu bytes)...\n", sizeof(header));
+    if (!_indexHandler.write(reinterpret_cast<const uint8_t*>(&header), sizeof(header), bytesWritten) ||
+        bytesWritten != sizeof(header)) {
+        DEBUG_PRINT("saveIndexHeader: Write failed (wrote %zu bytes, expected %zu).\n", bytesWritten, sizeof(header));
         _indexHandler.close();
         return false;
     }
@@ -69,6 +74,7 @@ bool DBEngine::saveIndexHeader(void) {
     DEBUG_PRINT("saveIndexHeader: Done. _indexCount = %u\n", _indexCount);
     return true;
 }
+
 
 //
 // loadIndexHeader()
@@ -84,16 +90,29 @@ bool DBEngine::loadIndexHeader(void) {
         _indexCount = 0;
         return true;
     }
-    if (!_indexHandler.read((uint8_t*)&_indexCount, sizeof(_indexCount), bytesRead) ||
-        bytesRead != sizeof(_indexCount)) {
-        DEBUG_PRINT("loadIndexHeader: Read failed (read %zu bytes, expected %zu).\n", bytesRead, sizeof(_indexCount));
+    DBIndexHeader header;
+    if (!_indexHandler.read(reinterpret_cast<uint8_t*>(&header), sizeof(header), bytesRead) ||
+        bytesRead != sizeof(header)) {
+        DEBUG_PRINT("loadIndexHeader: Read failed (read %zu bytes, expected %zu).\n", bytesRead, sizeof(header));
         _indexHandler.close();
         return false;
     }
     _indexHandler.close();
+
+    // Validate the header.
+    if (header.magic != DB_MAGIC_NUMBER) {
+        DEBUG_PRINT("loadIndexHeader: Invalid magic number.\n");
+        return false;
+    }
+    if (header.version != 1) {
+        DEBUG_PRINT("loadIndexHeader: Unsupported version %u.\n", header.version);
+        return false;
+    }
+    _indexCount = header.indexCount;
     DEBUG_PRINT("loadIndexHeader: _indexCount = %u\n", _indexCount);
     return true;
 }
+
 
 //
 // flushIndexPage()
@@ -114,9 +133,9 @@ bool DBEngine::flushIndexPage(void) {
         return false;
     }
 
-    size_t pageOffset = sizeof(_indexCount) + _currentPageNumber * sizeof(IndexEntry) * MAX_INDEX_ENTRIES;
+    size_t pageOffset = sizeof(DBIndexHeader) + _currentPageNumber * sizeof(IndexEntry) * MAX_INDEX_ENTRIES;
     DEBUG_PRINT("flushIndexPage: Seeking to offset %zu\n", pageOffset);
-    if (!_indexHandler.seek((uint32_t)pageOffset)) {
+    if (!_indexHandler.seek(static_cast<uint32_t>(pageOffset))) {
         DEBUG_PRINT("flushIndexPage: Seek failed.\n");
         _indexHandler.close();
         return false;
@@ -126,12 +145,12 @@ bool DBEngine::flushIndexPage(void) {
     uint32_t pageFirstIndex = _currentPageNumber * MAX_INDEX_ENTRIES;
     uint32_t entriesInPage = 0;
     if (_indexCount > pageFirstIndex)
-        entriesInPage = MIN((uint32_t)MAX_INDEX_ENTRIES, _indexCount - pageFirstIndex);
+        entriesInPage = MIN(MAX_INDEX_ENTRIES, _indexCount - pageFirstIndex);
     size_t bytesToWrite = entriesInPage * sizeof(IndexEntry);
 
     DEBUG_PRINT("flushIndexPage: Writing %zu bytes (entriesInPage = %u)...\n", bytesToWrite, entriesInPage);
     size_t bytesWritten = 0;
-    if (!_indexHandler.write((const uint8_t*)_indexPage, bytesToWrite, bytesWritten) ||
+    if (!_indexHandler.write(reinterpret_cast<const uint8_t*>(_indexPage), bytesToWrite, bytesWritten) ||
         bytesWritten != bytesToWrite) {
         DEBUG_PRINT("flushIndexPage: Write failed (wrote %zu bytes, expected %zu).\n", bytesWritten, bytesToWrite);
         _indexHandler.close();
@@ -139,17 +158,17 @@ bool DBEngine::flushIndexPage(void) {
     }
     _indexHandler.close();
 
-    // Now update the header to reflect the new _indexCount.
+    // Update the header with the new _indexCount.
     if (!saveIndexHeader()) {
         DEBUG_PRINT("flushIndexPage: Failed to update the index header.\n");
         return false;
     }
 
     _pageDirty = false;
-
     DEBUG_PRINT("flushIndexPage: Flush successful.\n");
     return true;
 }
+
 
 //
 // loadIndexPage()
@@ -170,9 +189,9 @@ bool DBEngine::loadIndexPage(uint32_t pageNumber) {
         return false;
     }
 
-    size_t pageOffset = sizeof(_indexCount) + pageNumber * sizeof(IndexEntry) * MAX_INDEX_ENTRIES;
+    size_t pageOffset = sizeof(DBIndexHeader) + pageNumber * sizeof(IndexEntry) * MAX_INDEX_ENTRIES;
     DEBUG_PRINT("loadIndexPage: Seeking to offset %zu\n", pageOffset);
-    if (!_indexHandler.seek((uint32_t)pageOffset)) {
+    if (!_indexHandler.seek(static_cast<uint32_t>(pageOffset))) {
         DEBUG_PRINT("loadIndexPage: Seek failed.\n");
         _indexHandler.close();
         return false;
@@ -180,12 +199,12 @@ bool DBEngine::loadIndexPage(uint32_t pageNumber) {
 
     uint32_t expectedEntries = 0;
     if (_indexCount > pageNumber * MAX_INDEX_ENTRIES)
-        expectedEntries = MIN((uint32_t)MAX_INDEX_ENTRIES, _indexCount - pageNumber * MAX_INDEX_ENTRIES);
+        expectedEntries = MIN(MAX_INDEX_ENTRIES, _indexCount - pageNumber * MAX_INDEX_ENTRIES);
     size_t bytesExpected = expectedEntries * sizeof(IndexEntry);
     DEBUG_PRINT("loadIndexPage: Expected entries: %u, bytesExpected: %zu\n", expectedEntries, bytesExpected);
 
     size_t bytesRead = 0;
-    bool readSuccess = _indexHandler.read((uint8_t*)_indexPage, bytesExpected, bytesRead);
+    bool readSuccess = _indexHandler.read(reinterpret_cast<uint8_t*>(_indexPage), bytesExpected, bytesRead);
     _indexHandler.close();
 
     if (!readSuccess && bytesRead > 0) {
@@ -199,7 +218,7 @@ bool DBEngine::loadIndexPage(uint32_t pageNumber) {
     DEBUG_PRINT("loadIndexPage: Read %zu bytes (expected %zu).\n", bytesRead, bytesExpected);
     if (bytesRead < bytesExpected) {
         DEBUG_PRINT("loadIndexPage: Partial read; zero-filling remaining %zu bytes.\n", bytesExpected - bytesRead);
-        memset((uint8_t*)_indexPage + bytesRead, 0, bytesExpected - bytesRead);
+        memset(reinterpret_cast<uint8_t*>(_indexPage) + bytesRead, 0, bytesExpected - bytesRead);
     }
 
     _currentPageNumber = pageNumber;
@@ -208,6 +227,7 @@ bool DBEngine::loadIndexPage(uint32_t pageNumber) {
     DEBUG_PRINT("loadIndexPage: Page %u loaded successfully.\n", pageNumber);
     return true;
 }
+
 
 //
 // getIndexEntry()
@@ -219,15 +239,27 @@ bool DBEngine::getIndexEntry(uint32_t globalIndex, IndexEntry& entry) {
     uint32_t page = globalIndex / MAX_INDEX_ENTRIES;
     uint32_t offset = globalIndex % MAX_INDEX_ENTRIES;
     DEBUG_PRINT("getIndexEntry: globalIndex = %u, page = %u, offset = %u\n", globalIndex, page, offset);
+
+    // Check if the desired page is already loaded.
     if (!_pageLoaded || _currentPageNumber != page) {
+        // If a page is loaded but it is dirty, flush it first.
+        if (_pageLoaded && _pageDirty) {
+            DEBUG_PRINT("getIndexEntry: Current page %u is dirty; flushing page...\n", _currentPageNumber);
+            if (!flushIndexPage()) {
+                DEBUG_PRINT("getIndexEntry: Flush failed.\n");
+                return false;
+            }
+        }
         DEBUG_PRINT("getIndexEntry: Loading page %u...\n", page);
         if (!loadIndexPage(page))
             return false;
     }
+
     entry = _indexPage[offset];
     DEBUG_PRINT("getIndexEntry: Retrieved entry: key=%u, offset=%u, status=%u\n", entry.key, entry.offset, entry.status);
     return true;
 }
+
 
 //
 // setIndexEntry()
@@ -263,18 +295,14 @@ bool DBEngine::splitPageAndInsert(uint32_t targetPage, uint32_t offsetInPage,
     SCOPE_TIMER("DBEngine::splitPageAndInsert");
     DEBUG_PRINT("splitPageAndInsert: Splitting page %u at offset %u for new key=%u\n", targetPage, offsetInPage, key);
 
-    // Assume the target page is loaded and is full.
-    uint32_t fullCount = MAX_INDEX_ENTRIES;  // current page is full.
     uint32_t splitIndex = MAX_INDEX_ENTRIES / 2;
 
     // Prepare a temporary buffer for the new page.
     IndexEntry newPageBuffer[MAX_INDEX_ENTRIES];
-    // Copy the second half of the target page into the new page buffer.
     memcpy(newPageBuffer, &_indexPage[splitIndex], (MAX_INDEX_ENTRIES - splitIndex) * sizeof(IndexEntry));
 
-    // Determine in which half the new entry should be inserted.
+    // Insert the new entry into the appropriate half.
     if (offsetInPage < splitIndex) {
-        // New entry belongs in the current page.
         size_t numToShift = splitIndex - offsetInPage;
         if (numToShift > 0) {
             memmove(&_indexPage[offsetInPage + 1], &_indexPage[offsetInPage], numToShift * sizeof(IndexEntry));
@@ -284,7 +312,6 @@ bool DBEngine::splitPageAndInsert(uint32_t targetPage, uint32_t offsetInPage,
         _indexPage[offsetInPage].status = status;
     }
     else {
-        // New entry belongs in the new page.
         uint32_t newOffset = offsetInPage - splitIndex;
         size_t numToShift = (MAX_INDEX_ENTRIES - splitIndex) - newOffset;
         if (numToShift > 0) {
@@ -306,21 +333,20 @@ bool DBEngine::splitPageAndInsert(uint32_t targetPage, uint32_t offsetInPage,
     }
 
     // Write out the new page.
-    // New page number is targetPage + 1.
     uint32_t newPageNumber = targetPage + 1;
     if (!_indexHandler.open(_indexFileName, "rb+")) {
-        if (!_indexHandler.open(_indexFileName, "wb"))
+        if (!_indexHandler.open(_indexFileName, "wb+"))
             return false;
     }
-    size_t newPageOffset = sizeof(_indexCount) + newPageNumber * sizeof(IndexEntry) * MAX_INDEX_ENTRIES;
-    if (!_indexHandler.seek((uint32_t)newPageOffset)) {
+    size_t newPageOffset = sizeof(DBIndexHeader) + newPageNumber * sizeof(IndexEntry) * MAX_INDEX_ENTRIES;
+    if (!_indexHandler.seek(static_cast<uint32_t>(newPageOffset))) {
         DEBUG_PRINT("splitPageAndInsert: Seek failed for new page offset.\n");
         _indexHandler.close();
         return false;
     }
     size_t bytesToWrite = (MAX_INDEX_ENTRIES - splitIndex) * sizeof(IndexEntry);
     size_t bytesWritten = 0;
-    if (!_indexHandler.write((const uint8_t*)newPageBuffer, bytesToWrite, bytesWritten) ||
+    if (!_indexHandler.write(reinterpret_cast<const uint8_t*>(newPageBuffer), bytesToWrite, bytesWritten) ||
         bytesWritten != bytesToWrite) {
         DEBUG_PRINT("splitPageAndInsert: Write failed for new page (wrote %zu bytes, expected %zu).\n", bytesWritten, bytesToWrite);
         _indexHandler.close();
@@ -328,15 +354,15 @@ bool DBEngine::splitPageAndInsert(uint32_t targetPage, uint32_t offsetInPage,
     }
     _indexHandler.close();
 
-    // After splitting, update header with the new _indexCount.
+    // Update the header with the new _indexCount.
     if (!saveIndexHeader())
         return false;
 
-    // The current page (_indexPage) still holds the first half (plus any shifted entries).
     _pageDirty = false;
     DEBUG_PRINT("splitPageAndInsert: Split and insertion successful. New _indexCount = %u\n", _indexCount);
     return true;
 }
+
 
 bool DBEngine::insertIndexEntry(uint32_t key, uint32_t offset, uint8_t status) {
     SCOPE_TIMER("DBEngine::insertIndexEntry");
@@ -479,7 +505,7 @@ bool DBEngine::findIndexEntry(uint32_t key, uint32_t& offset) const {
 //
 // B-Tree–Style Search Methods
 //
-bool DBEngine::btreeFindKey(uint32_t key, uint32_t* index) {
+bool DBEngine::findKey(uint32_t key, uint32_t* index) {
     SCOPE_TIMER("DBEngine::btreeFindKey");
     uint32_t low = 0, high = _indexCount;
     DEBUG_PRINT("btreeFindKey: Searching for key=%u\n", key);
@@ -504,7 +530,7 @@ bool DBEngine::btreeFindKey(uint32_t key, uint32_t* index) {
     return false;
 }
 
-bool DBEngine::btreeLocateKey(uint32_t key, uint32_t* index) {
+bool DBEngine::locateKey(uint32_t key, uint32_t* index) {
     SCOPE_TIMER("DBEngine::btreeLocateKey");
     uint32_t low = 0, high = _indexCount;
     uint32_t result = _indexCount;
@@ -531,7 +557,7 @@ bool DBEngine::btreeLocateKey(uint32_t key, uint32_t* index) {
     return false;
 }
 
-bool DBEngine::btreeNextKey(uint32_t currentIndex, uint32_t* nextIndex) {
+bool DBEngine::nextKey(uint32_t currentIndex, uint32_t* nextIndex) {
     SCOPE_TIMER("DBEngine::btreeNextKey");
     if (currentIndex + 1 < _indexCount) {
         *nextIndex = currentIndex + 1;
@@ -542,7 +568,7 @@ bool DBEngine::btreeNextKey(uint32_t currentIndex, uint32_t* nextIndex) {
     return false;
 }
 
-bool DBEngine::btreePrevKey(uint32_t currentIndex, uint32_t* prevIndex) {
+bool DBEngine::prevKey(uint32_t currentIndex, uint32_t* prevIndex) {
     SCOPE_TIMER("DBEngine::btreePrevKey");
     if (currentIndex > 0) {
         *prevIndex = currentIndex - 1;
@@ -558,7 +584,7 @@ bool DBEngine::btreePrevKey(uint32_t currentIndex, uint32_t* prevIndex) {
 //   Searches the index for records with the specified status.
 //   Fills the provided results array with the global index positions.
 //
-size_t DBEngine::dbFindRecordsByStatus(uint8_t status, uint32_t results[], size_t maxResults) const {
+size_t DBEngine::findByStatus(uint8_t status, uint32_t results[], size_t maxResults) const {
     SCOPE_TIMER("DBEngine::dbFindRecordsByStatus");
     size_t count = 0;
     DEBUG_PRINT("dbFindRecordsByStatus: Searching for status=%u\n", status);
@@ -575,7 +601,7 @@ size_t DBEngine::dbFindRecordsByStatus(uint8_t status, uint32_t results[], size_
     return count;
 }
 
-size_t DBEngine::dbGetIndexCount(void) const {
+size_t DBEngine::indexCount(void) const {
     SCOPE_TIMER("DBEngine::dbGetIndexCount");
     DEBUG_PRINT("dbGetIndexCount: _indexCount = %u\n", _indexCount);
     return _indexCount;
@@ -586,7 +612,7 @@ size_t DBEngine::dbGetIndexCount(void) const {
 //   Initializes the in-memory index state by loading the header.
 //   (Pages will be loaded on demand. Also performs a simple validation to detect corruption.)
 //
-bool DBEngine::dbBuildIndex(void) {
+bool DBEngine::loadIndex(void) {
     SCOPE_TIMER("DBEngine::dbBuildIndex");
     DEBUG_PRINT("dbBuildIndex: Building index...\n");
     bool result = loadIndexHeader();
