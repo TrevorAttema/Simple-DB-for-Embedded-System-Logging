@@ -1,4 +1,4 @@
-Below is the rewritten, detailed README that incorporates all the suggested improvements. This version provides a quick–start guide, detailed explanations for porting (including how to implement your own IFileHandler), memory and paging configuration guidance, debugging tips, and several fully commented examples.
+Below is the complete, detailed README file incorporating all previous improvements—with an added section explaining that scope timers (and debug output) are intended only for Windows development and testing, and are compiled out for embedded targets.
 
 ---
 
@@ -11,13 +11,13 @@ Below is the rewritten, detailed README that incorporates all the suggested impr
 ## Quick Start
 
 1. **Implement the IFileHandler Interface:**  
-   Create your own file handler for your target storage device (e.g., SD card, onboard flash, or any block device). If you’re using FatFs, wrap the FatFs functions into your implementation. See `FileHandler_Windows.cpp` for an example reference.
+   Create your own file handler for your target storage device (e.g., SD card, onboard flash, or any block device). If you’re using FatFs, wrap the FatFs functions in your implementation. See `FileHandler_Windows.cpp` for an example reference.
 
 2. **Instantiate DBEngine:**  
    Create an instance of `DBEngine` using your IFileHandler implementations for both the log and index files.
 
 3. **Open the Database:**  
-   Call `open()` with your chosen filenames. This call will automatically open the files, validate (or create) the headers, and load the first index page into memory.
+   Call `open()` with your chosen filenames. This call automatically opens the files, validates (or creates) the headers, and loads the first index page into memory.
 
 4. **Use the Database Functions:**  
    Append, retrieve, update, or delete records, and use the provided search functions to access data quickly.
@@ -29,12 +29,12 @@ Below is the rewritten, detailed README that incorporates all the suggested impr
 DBEngine uses a log–and–index storage strategy:
 
 - **Log File:**  
-  Data records are appended sequentially to a log file. Each record includes a header (with metadata such as record type, length, key, and status) followed by the payload.
+  Data records are appended sequentially to a log file. Each record consists of a header (with metadata such as record type, length, key, and status) followed by the payload.
 
 - **Index File:**  
-  A sorted index file maps record keys to their offsets in the log file. This index is managed in fixed–size pages to minimize RAM usage. Only one page (by default, 256 entries) is loaded into memory at any time.
+  A sorted index file maps record keys to their offsets in the log file. This index is managed in fixed–size pages to minimize RAM usage—only one page (by default, 256 entries) is loaded into memory at any time.
 
-Calling **`open`** will automatically handle all necessary file operations (opening, header verification/creation, and initial index page load) so that the database is immediately ready for subsequent operations.
+When you call **`open`**, the engine automatically performs all necessary file operations (opening, header verification/creation, and initial index page load) so that the database is immediately ready for use.
 
 ---
 
@@ -119,13 +119,43 @@ Experiment with different values for `MAX_INDEX_ENTRIES`. Use the provided instr
 
 ---
 
+## Instrumentation & Debugging Configuration
+
+- **Scope Timer (SCOPE_TIMER):**  
+  The `SCOPE_TIMER` macro is used for measuring the execution time of functions during Windows development and testing. For embedded devices, **this feature is disabled** (compiled out) to avoid overhead.  
+  - **For Windows development/testing:**  
+    ```cpp
+    #define SCOPE_TIMER(name) ScopedTimer timer(name)
+    ```
+  - **For embedded targets (production):**  
+    ```cpp
+    #define SCOPE_TIMER(name)
+    ```
+    
+- **Debug Output (DEBUG_PRINT):**  
+  Similarly, debug print statements are enabled for testing (if uncommented) but are compiled out in embedded builds.  
+  - **For testing:**  
+    ```cpp
+    //#define DEBUG_PRINT(...) printf(__VA_ARGS__)
+    #define DEBUG_PRINT(...)
+    ```
+  - **For embedded production:**  
+    Debug prints remain disabled:
+    ```cpp
+    #define DEBUG_PRINT(...)
+    ```
+
+These configurations ensure that instrumentation and debug output do not affect performance or resource usage on embedded devices.
+
+---
+
 ## Design Philosophy
 
 - **Lightweight & Fast:**  
-  DBEngine has no STL dependencies and does not perform dynamic memory allocation. It is optimized for embedded systems where fast reads and low overhead for writes/updates are critical.
+  DBEngine has no STL dependencies and does not use dynamic memory allocation. It is optimized for embedded systems where fast reads and low overhead on writes/updates are critical.
 
 - **Portability & Modularity:**  
-  With the abstract `IFileHandler` interface, DBEngine is easy to port. Implement the interface for your target platform—whether that’s an SD card using FatFs, onboard flash memory, or even a desktop system (using `WindowsFileHandler`).
+  With the abstract `IFileHandler` interface, DBEngine is easy to port. Implement the interface for your target platform—whether you’re logging to an SD card using FatFs, onboard flash memory, or even a desktop system (using `WindowsFileHandler`).
 
 - **Robustness:**  
   Multiple levels of duplicate key checking and index validation ensure data integrity and consistency.
@@ -139,7 +169,7 @@ Experiment with different values for `MAX_INDEX_ENTRIES`. Use the provided instr
 
 ### DBEngine
 
-The `DBEngine` class is responsible for all database operations including log and index file management.
+The `DBEngine` class is responsible for all database operations, including log and index file management.
 
 #### Main Functions
 
@@ -186,156 +216,417 @@ DBEngine uses the `Instrumentation.h` header and `SCOPE_TIMER` macros to time cr
 - Identifying performance bottlenecks.
 - Ensuring that your configuration meets your application’s requirements.
 
-You can disable debug prints and instrumentation in production builds to reduce overhead.
+Remember, on embedded devices these features are compiled out to reduce overhead.
 
 ---
 
 ## Debugging & Test Considerations
 
 - **Testing with Sequential Keys:**  
-  The test suite uses sequential key values. If you run tests multiple times without resetting, duplicate key errors may occur since DBEngine only accepts unique keys.
+  The test suite uses sequential key values. Running tests multiple times without resetting the files may cause duplicate key errors since DBEngine only accepts unique keys.
 
 - **Resetting the Test Environment:**  
-  For testing, ensure you delete the existing log and index files before running tests. This guarantees that each test run starts fresh. (See the example in the test main function below.)
+  For testing, delete the existing log and index files before running tests. This guarantees that each test run starts fresh. (See the example in the test main function below.)
 
 - **Troubleshooting Tips:**  
-  - If duplicate key errors arise, check that old files have been removed.
+  - If duplicate key errors occur, verify that old files have been removed.
   - Use instrumentation output to determine if page switches are causing performance issues.
 
 ---
 
-## Detailed Usage Examples
+Below is a complete, tidied set of usage examples written in C++ without using the STL. The examples are divided into two sections—**Basic Examples** (for the most common operations) and **Advanced Examples** (covering more complex operations such as B–tree–style searches and deletion). These examples rely only on C standard libraries (e.g., `<stdio.h>`, `<stdlib.h>`, `<string.h>`) along with the DBEngine interface. They also assume you’re using the Windows implementation of `IFileHandler` (from `FileHandler_Windows.h`) for testing; when porting to your embedded device, replace this with your own implementation (for example, one that wraps FatFs functions). Remember that on embedded devices the scope timer and debug prints are compiled out to reduce overhead.
 
-### Example 1: Opening the Database
+---
+
+## Basic Examples
+
+### Example 1: Resetting Files and Opening the Database
+
+This example shows how to delete any existing database files (to ensure a fresh start) and open the database. The `open()` call automatically loads the index.
 
 ```cpp
 #include "DBEngine.h"
-#include "WindowsFileHandler.h" // Or your custom IFileHandler implementation
-#include <cstdio>
+#include "FileHandler_Windows.h"  // Your Windows implementation of IFileHandler
+#include <stdio.h>    // For printf() and remove()
+#include <stdlib.h>
 
-int main() {
-    // If running tests, delete existing files to ensure a fresh start.
-    if (std::remove("logfile.db") == 0) {
+int main(void) {
+    printf("Starting DBEngine Example: Open Database\n");
+
+    // Delete existing database files so that tests start fresh.
+    if (remove("logfile.db") == 0) {
         printf("Deleted existing logfile.db\n");
     }
-    if (std::remove("indexfile.idx") == 0) {
+    if (remove("indexfile.idx") == 0) {
         printf("Deleted existing indexfile.idx\n");
     }
 
+    // Instantiate file handlers.
     WindowsFileHandler logHandler;
     WindowsFileHandler indexHandler;
 
-    // Create the DBEngine instance using your file handlers.
-    DBEngine dbEngine(logHandler, indexHandler);
-
-    // Open the database; this call automatically loads the index.
-    if (!dbEngine.open("logfile.db", "indexfile.idx")) {
-        printf("Failed to open DBEngine.\n");
-        return -1;
+    // Create and open the DBEngine.
+    DBEngine db(logHandler, indexHandler);
+    if (!db.open("logfile.db", "indexfile.idx")) {
+        printf("Error opening database files.\n");
+        return 1;
     }
-
     printf("Database opened successfully (index loaded automatically).\n");
     return 0;
 }
 ```
 
-### Example 2: Appending a Record
+---
+
+### Example 2: Appending Records and Verifying the Index Count
+
+This example appends several records to the database and checks that the index count increases as expected.
 
 ```cpp
-#include <cstdint>
-#include <cstdio>
 #include "DBEngine.h"
+#include "FileHandler_Windows.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 // Define a sample record structure.
-struct MyRecord {
-    uint32_t id;
-    char data[64];
+struct TemperatureRecord {
+    float temperature;
+    float humidity;
+    unsigned int height;
+    unsigned int width;
+    char name[100];
 };
 
-int main() {
-    // Assume that DBEngine has been initialized and opened as shown in Example 1.
-    DBEngine dbEngine(/* appropriate file handlers */);
+int main(void) {
+    printf("Starting DBEngine Example: Append Records\n");
 
-    MyRecord record = { 1234, "Hello, world!" };
+    // Remove existing files.
+    remove("logfile.db");
+    remove("indexfile.idx");
 
-    // Append the record to the database.
-    if (!dbEngine.append(record.id, /* recordType */ 0, &record, sizeof(record))) {
-        printf("Failed to append record.\n");
-        return -1;
+    // Initialize DBEngine.
+    WindowsFileHandler logHandler;
+    WindowsFileHandler indexHandler;
+    DBEngine db(logHandler, indexHandler);
+    if (!db.open("logfile.db", "indexfile.idx")) {
+        printf("Error opening database files.\n");
+        return 1;
     }
 
-    printf("Record appended successfully.\n");
-    return 0;
+    TemperatureRecord rec;
+    rec.temperature = 23.5f;
+    rec.humidity = 45.0f;
+    rec.height = 1;
+    rec.width = 2;
+    strcpy(rec.name, "Temperature data");
+
+    int success = 1;
+    unsigned int i;
+    for (i = 0; i < 10; i++) {
+        rec.temperature += 0.1f;
+        rec.humidity += 0.05f;
+        unsigned int key = i + 1;  // Use sequential keys starting at 1.
+        if (!db.append(key, 1, &rec, sizeof(rec))) {
+            printf("Failed appending record with key %u\n", key);
+            success = 0;
+            break;
+        }
+        if (db.indexCount() != i + 1) {
+            printf("Index count mismatch after inserting key %u\n", key);
+            success = 0;
+            break;
+        }
+    }
+
+    if (success)
+        printf("All records appended successfully.\n");
+    else
+        printf("Error during appending records.\n");
+
+    return success ? 0 : 1;
 }
 ```
+
+---
 
 ### Example 3: Retrieving a Record by Key
 
-```cpp
-#include <cstdint>
-#include <cstdio>
-#include "DBEngine.h"
+This example appends a record and then retrieves it using its key.
 
-struct MyRecord {
-    uint32_t id;
-    char data[64];
+```cpp
+#include "DBEngine.h"
+#include "FileHandler_Windows.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// Define a sample record structure.
+struct TemperatureRecord {
+    float temperature;
+    float humidity;
+    unsigned int height;
+    unsigned int width;
+    char name[100];
 };
 
-int main() {
-    // Assume that DBEngine has been initialized and opened.
-    DBEngine dbEngine(/* appropriate file handlers */);
-    
-    uint32_t keyToFind = 1234;
-    MyRecord record;
-    uint16_t recordSize = 0;
+int main(void) {
+    printf("Starting DBEngine Example: Retrieve Record\n");
 
-    if (!dbEngine.get(keyToFind, &record, sizeof(record), &recordSize)) {
-        printf("Record with key %u not found.\n", keyToFind);
-        return -1;
+    // Remove existing files.
+    remove("logfile.db");
+    remove("indexfile.idx");
+
+    // Initialize and open DBEngine.
+    WindowsFileHandler logHandler;
+    WindowsFileHandler indexHandler;
+    DBEngine db(logHandler, indexHandler);
+    if (!db.open("logfile.db", "indexfile.idx")) {
+        printf("Error opening database files.\n");
+        return 1;
     }
 
-    printf("Record found (size: %u bytes): %s\n", recordSize, record.data);
-    return 0;
-}
-```
-
-### Example 4: Updating a Record's Status (Custom Status Bits)
-
-Sometimes you might want to flag a record for your own purposes—for example, marking it as “processed” using a custom status bit (e.g., `0x02`). The following example demonstrates how to update a record’s status:
-
-```cpp
-#include <cstdint>
-#include <cstdio>
-#include "DBEngine.h"
-
-int main() {
-    // Assume that DBEngine has been initialized and opened.
-    DBEngine dbEngine(/* appropriate file handlers */);
-    
-    uint32_t keyToUpdate = 1234;
-    uint32_t index = 0;
-    
-    // Locate the record in the index.
-    if (!dbEngine.searchIndex(keyToUpdate, &index)) {
-        printf("Record with key %u not found.\n", keyToUpdate);
-        return -1;
+    // Append a record to retrieve.
+    TemperatureRecord rec;
+    rec.temperature = 25.0f;
+    rec.humidity = 50.0f;
+    rec.height = 10;
+    rec.width = 20;
+    strcpy(rec.name, "Record for Retrieval");
+    unsigned int key = 123;
+    if (!db.append(key, 1, &rec, sizeof(rec))) {
+        printf("Failed appending record.\n");
+        return 1;
     }
-    
-    // Define a custom status value. For example, 0x02 might indicate "processed."
-    uint8_t customStatus = 0x02;
-    
-    // Update the record's status using its global index.
-    if (!dbEngine.updateStatus(index, customStatus)) {
-        printf("Failed to update status for record with key %u.\n", keyToUpdate);
-        return -1;
+
+    // Retrieve the record by key.
+    TemperatureRecord retrieved;
+    unsigned short recordSize = 0;
+    if (!db.get(key, &retrieved, sizeof(retrieved), &recordSize)) {
+        printf("Failed to retrieve record with key %u\n", key);
+        return 1;
     }
-    
-    printf("Record status updated successfully for key %u.\n", keyToUpdate);
+
+    if (recordSize == sizeof(retrieved))
+        printf("Record retrieved successfully: %s\n", retrieved.name);
+    else
+        printf("Record size mismatch.\n");
+
     return 0;
 }
 ```
 
 ---
+
+### Example 4: Updating a Record's Status (Custom Status Bits)
+
+This example demonstrates how to update a record's status. For instance, you might flag a record as "processed" by setting a custom status bit.
+
+```cpp
+#include "DBEngine.h"
+#include "FileHandler_Windows.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+#define STATUS_PROCESSED 0x02  // Example custom status: record has been processed.
+
+int main(void) {
+    printf("Starting DBEngine Example: Update Record Status\n");
+
+    // Remove existing files.
+    remove("logfile.db");
+    remove("indexfile.idx");
+
+    // Initialize DBEngine.
+    WindowsFileHandler logHandler;
+    WindowsFileHandler indexHandler;
+    DBEngine db(logHandler, indexHandler);
+    if (!db.open("logfile.db", "indexfile.idx")) {
+        printf("Error opening database files.\n");
+        return 1;
+    }
+
+    // Append a record.
+    unsigned int key = 123;
+    int dummyData = 42;
+    if (!db.append(key, 1, &dummyData, sizeof(dummyData))) {
+        printf("Failed to append record.\n");
+        return 1;
+    }
+
+    // Locate the record using searchIndex.
+    unsigned int index = 0;
+    if (!db.searchIndex(key, &index)) {
+        printf("Record with key %u not found.\n", key);
+        return 1;
+    }
+
+    // Update the record's status to indicate it has been processed.
+    if (!db.updateStatus(index, STATUS_PROCESSED)) {
+        printf("Failed to update status for record with key %u\n", key);
+        return 1;
+    }
+
+    printf("Record status updated successfully for key %u\n", key);
+    return 0;
+}
+```
+
+---
+
+## Advanced Examples
+
+### Example 5: B–Tree–Style Search (Finding and Locating Keys)
+
+This example shows how to use DBEngine’s B–tree–style search methods to find and locate keys in the database.
+
+```cpp
+#include "DBEngine.h"
+#include "FileHandler_Windows.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    printf("Starting DBEngine Example: B-Tree Search\n");
+
+    // Remove existing files.
+    remove("logfile.db");
+    remove("indexfile.idx");
+
+    // Initialize DBEngine.
+    WindowsFileHandler logHandler;
+    WindowsFileHandler indexHandler;
+    DBEngine db(logHandler, indexHandler);
+    if (!db.open("logfile.db", "indexfile.idx")) {
+        printf("Error opening database files.\n");
+        return 1;
+    }
+
+    // Append several records with sequential keys.
+    unsigned int key;
+    int data;
+    for (key = 1; key <= 10; key++) {
+        data = key * 100;  // Simple integer data.
+        if (!db.append(key, 1, &data, sizeof(data))) {
+            printf("Failed appending record with key %u\n", key);
+            return 1;
+        }
+    }
+
+    // Use findKey to search for an existing key.
+    unsigned int searchKey = 5;
+    unsigned int foundIndex = 0;
+    if (db.findKey(searchKey, &foundIndex))
+        printf("findKey succeeded: Key %u found at index %u\n", searchKey, foundIndex);
+    else
+        printf("findKey failed: Key %u not found.\n", searchKey);
+
+    // Use locateKey to locate the position of an existing key.
+    unsigned int locatedIndex = 0;
+    if (db.locateKey(searchKey, &locatedIndex))
+        printf("locateKey succeeded: Key %u located at index %u\n", searchKey, locatedIndex);
+    else
+        printf("locateKey failed: Key %u not located.\n", searchKey);
+
+    // Attempt to search for a non-existent key.
+    unsigned int missingKey = 999;
+    if (!db.findKey(missingKey, &foundIndex))
+        printf("Correctly did not find non-existent key %u\n", missingKey);
+    else
+        printf("Error: Unexpectedly found non-existent key %u\n", missingKey);
+
+    return 0;
+}
+```
+
+---
+
+### Example 6: Deleting Records
+
+This advanced example demonstrates several deletion scenarios:
+- Deleting a non-existent key.
+- Deleting the first record.
+- Deleting arbitrary records.
+- Reinserting a record with a deleted key to verify that the deletion flag is cleared.
+
+```cpp
+#include "DBEngine.h"
+#include "FileHandler_Windows.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    printf("Starting DBEngine Example: Delete Records\n");
+
+    // Remove existing files.
+    remove("logfile.db");
+    remove("indexfile.idx");
+
+    // Initialize DBEngine.
+    WindowsFileHandler logHandler;
+    WindowsFileHandler indexHandler;
+    DBEngine db(logHandler, indexHandler);
+    if (!db.open("logfile.db", "indexfile.idx")) {
+        printf("Error opening database files.\n");
+        return 1;
+    }
+
+    // Append records with keys 1 to 20.
+    unsigned int key;
+    int data;
+    for (key = 1; key <= 20; key++) {
+        data = key;
+        if (!db.append(key, 1, &data, sizeof(data))) {
+            printf("Failed appending record with key %u\n", key);
+            return 1;
+        }
+    }
+    printf("20 records appended.\n");
+
+    // Delete a non-existent key.
+    unsigned int nonExistentKey = 9999;
+    if (!db.deleteRecord(nonExistentKey))
+        printf("Correctly did not delete non-existent key %u\n", nonExistentKey);
+    else
+        printf("Error: Deleted non-existent key %u\n", nonExistentKey);
+
+    // Delete the first record.
+    if (db.deleteRecord(1))
+        printf("First record (key 1) deleted successfully.\n");
+    else
+        printf("Failed to delete first record (key 1).\n");
+
+    // Delete a few arbitrary records.
+    unsigned int keysToDelete[3] = { 5, 10, 15 };
+    int i;
+    for (i = 0; i < 3; i++) {
+        if (db.deleteRecord(keysToDelete[i]))
+            printf("Record with key %u deleted.\n", keysToDelete[i]);
+        else
+            printf("Failed to delete record with key %u\n", keysToDelete[i]);
+    }
+
+    // Reinsert a record with a deleted key to verify that the deletion flag is cleared.
+    int newData = 555;
+    unsigned int reinsertKey = 5; // previously deleted key.
+    if (db.append(reinsertKey, 1, &newData, sizeof(newData)))
+        printf("Record reinserted with key %u\n", reinsertKey);
+    else
+        printf("Failed to reinsert record with key %u\n", reinsertKey);
+
+    return 0;
+}
+```
+
+---
+
+## Example Notes
+
+- **No STL:** All examples are written in C++ using only C standard libraries (`stdio.h`, `stdlib.h`, `string.h`).  
+- **Portability:** For your embedded target, implement your own version of `IFileHandler` (for example, wrapping FatFs functions) and compile out the scope timer and debug prints as described in the instrumentation configuration.  
+- **Sequence:** The basic examples introduce the core operations (opening the database, appending records, retrieving records, and updating status), while the advanced examples cover searching and deletion.
+
+By following these examples, you should be able to quickly learn how to use DBEngine for logging, retrieval, status updates, search operations, and deletion in your applications.
 
 ## Final Notes
 
@@ -343,7 +634,7 @@ int main() {
   Adjust `MAX_INDEX_ENTRIES` based on your system’s memory and performance characteristics. Smaller pages reduce RAM usage but increase I/O overhead, while larger pages improve I/O performance at the cost of higher memory usage.
 
 - **Instrumentation:**  
-  Use the provided instrumentation (via `SCOPE_TIMER`) to measure the performance of key functions. Disable debug prints and instrumentation in production builds if needed.
+  Use the provided instrumentation (via `SCOPE_TIMER`) to measure the performance of key functions. Remember that on embedded devices, the scope timer and debug prints are compiled out to avoid unnecessary overhead.
 
 - **Portability:**  
   If you’re not using Windows, implement your own version of `IFileHandler` to interface with your target device’s storage (e.g., FatFs for SD cards, custom drivers for onboard flash, etc.).

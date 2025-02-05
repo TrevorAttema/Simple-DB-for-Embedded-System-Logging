@@ -19,8 +19,8 @@
 
 // Define a macro to wrap a ScopedTimer creation.
 // Usage: SCOPE_TIMER("functionName");
-#define SCOPE_TIMER(name) ScopedTimer timer(name)
-//#define SCOPE_TIMER(name)
+//#define SCOPE_TIMER(name) ScopedTimer timer(name)
+#define SCOPE_TIMER(name)
 
 // For debugging: define a macro that prints debug messages.
 //#define DEBUG_PRINT(...) printf(__VA_ARGS__)
