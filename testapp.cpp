@@ -542,12 +542,24 @@ void testDeleteRecordsComprehensive() {
 int main() {
     std::cout << "Starting DBEngine Test Application" << std::endl;
 
+    // Delete existing database files to ensure each test run starts fresh.
+    // The tests use sequential key values. If the files already exist from a previous
+    // run, the same key values will be inserted again and the DB will reject duplicates.
+    if (std::remove("LOGFILE.BIN") == 0) {
+        std::cout << "Deleted existing LOGFILE.BIN" << std::endl;
+    }
+    if (std::remove("INDEX.BIN") == 0) {
+        std::cout << "Deleted existing INDEX.BIN" << std::endl;
+    }
+
+    //DBEngine db(/* appropriate logHandler */, /* appropriate indexHandler */);
+
     if (!db.open("LOGFILE.BIN", "INDEX.BIN")) {
         std::cerr << "Error opening database files." << std::endl;
         return 1;
     }
 
-    // Uncomment testAppendRecords() if you need to populate the DB.
+    // Uncomment testAppendRecords() if you need to initially populate the DB.
     testAppendRecords();
     testUpdateAndFindByStatus();
     testRetrieveRecords();
@@ -558,7 +570,8 @@ int main() {
 
     PrintInstrumentationReport();
 
-    //db.printStats();
+    // Optionally, print database statistics.
+    // db.printStats();
 
     return 0;
 }
