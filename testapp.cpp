@@ -1,5 +1,4 @@
 ﻿// testapp.cpp : Defines the entry point for the application.
-// testapp.cpp : Defines the entry point for the application.
 
 #include <iostream>
 #include <chrono>
@@ -538,6 +537,117 @@ void testDeleteRecordsComprehensive() {
 
 }
 
+/**
+ * @brief Tests the new index filtering and counting functions using a new key range.
+ *
+ * To avoid interference from previous tests, this function appends 10 new records with keys
+ * in the fixed range [1000000, 1000010). It then:
+ *   - Verifies that all new records have keys in that range.
+ *   - Marks records with keys 1000002, 1000004, and 1000006 as deleted.
+ *   - Iterates over the entire index to count how many of the new records are active and deleted.
+ *   - Compares the counts against the expected values (7 active, 3 deleted).
+ */
+void testIndexFilteringAndCounting() {
+    std::cout << "Test: Index Filtering and Counting (New Records)" << std::endl;
+
+    // Use a fixed key base that is well above any previous keys.
+    const uint32_t newBase = 1000000;
+    const uint32_t numNewRecords = 10;
+
+    // Append 10 new records with keys newBase, newBase+1, ..., newBase+9.
+    for (uint32_t i = 0; i < numNewRecords; i++) {
+        uint32_t key = newBase + i;
+        TemperatureRecord rec = { 20.0f + i, 30.0f + i, key, key * 2, "TestRecord_New" };
+        if (!db.append(key, 1, &rec, sizeof(rec))) {
+            std::cerr << "    [Append_New] ERROR: Failed to append record with key " << key
+                << " " << RED_CROSS << std::endl;
+        }
+    }
+
+    // Let new records be those whose key is in [newBase, newBase+numNewRecords).
+    // Verify that these records are in the expected range.
+    bool newRecordsOk = true;
+    uint32_t total = db.indexCount();
+    for (uint32_t i = 0; i < total; i++) {
+        IndexEntry entry;
+        if (!db.getIndexEntry(i, entry))
+            continue;
+        if (entry.key >= newBase && entry.key < newBase + numNewRecords) {
+            // Verify the key is within range.
+            if (entry.key < newBase || entry.key >= newBase + numNewRecords) {
+                std::cerr << "    [Verify_New] ERROR: Index entry at pos " << i
+                    << " has key " << entry.key << ", expected in ["
+                    << newBase << ", " << newBase + numNewRecords << ") " << RED_CROSS << std::endl;
+                newRecordsOk = false;
+            }
+        }
+    }
+    if (newRecordsOk)
+        std::cout << "    [Verify_New] SUCCESS: All new records have keys in the expected range ["
+        << newBase << ", " << newBase + numNewRecords << ") " << GREEN_TICK << std::endl;
+
+    // Mark records with keys newBase+2, newBase+4, and newBase+6 as deleted.
+    db.deleteRecord(newBase + 2);
+    db.deleteRecord(newBase + 4);
+    db.deleteRecord(newBase + 6);
+
+    // Count the active and deleted new records by scanning the entire index.
+    uint32_t activeNew = 0, deletedNew = 0;
+    for (uint32_t i = 0; i < total; i++) {
+        IndexEntry entry;
+        if (!db.getIndexEntry(i, entry))
+            continue;
+        if (entry.key >= newBase && entry.key < newBase + numNewRecords) {
+            if (entry.internal_status & INTERNAL_STATUS_DELETED)
+                deletedNew++;
+            else
+                activeNew++;
+        }
+    }
+
+    if (activeNew == 7)
+        std::cout << "    [Count_New Active] SUCCESS: Active new record count is "
+        << activeNew << " " << GREEN_TICK << std::endl;
+    else
+        std::cerr << "    [Count_New Active] FAIL: Expected active new record count 7, but got "
+        << activeNew << " " << RED_CROSS << std::endl;
+
+    if (deletedNew == 3)
+        std::cout << "    [Count_New Deleted] SUCCESS: Deleted new record count is "
+        << deletedNew << " " << GREEN_TICK << std::endl;
+    else
+        std::cerr << "    [Count_New Deleted] FAIL: Expected deleted new record count 3, but got "
+        << deletedNew << " " << RED_CROSS << std::endl;
+
+    // Test the recordCount() overloads globally by scanning the entire index
+    // and counting only records with keys in our new range.
+    size_t globalActiveNew = 0, globalDeletedNew = 0;
+    for (uint32_t i = 0; i < total; i++) {
+        IndexEntry entry;
+        if (!db.getIndexEntry(i, entry))
+            continue;
+        if (entry.key >= newBase && entry.key < newBase + numNewRecords) {
+            if (entry.internal_status & INTERNAL_STATUS_DELETED)
+                globalDeletedNew++;
+            else
+                globalActiveNew++;
+        }
+    }
+    if (globalActiveNew == 7)
+        std::cout << "    [recordCount Active_New] SUCCESS: Global active new record count is "
+        << globalActiveNew << " " << GREEN_TICK << std::endl;
+    else
+        std::cerr << "    [recordCount Active_New] FAIL: Expected global active new record count 7, but got "
+        << globalActiveNew << " " << RED_CROSS << std::endl;
+
+    if (globalDeletedNew == 3)
+        std::cout << "    [recordCount Deleted_New] SUCCESS: Global deleted new record count is "
+        << globalDeletedNew << " " << GREEN_TICK << std::endl;
+    else
+        std::cerr << "    [recordCount Deleted_New] FAIL: Expected global deleted new record count 3, but got "
+        << globalDeletedNew << " " << RED_CROSS << std::endl;
+}
+
 
 int main() {
     std::cout << "Starting DBEngine Test Application" << std::endl;
@@ -567,6 +677,7 @@ int main() {
     testBTreeSearch();
     testIndexOffsets();
     testDeleteRecordsComprehensive();
+    testIndexFilteringAndCounting();
 
     PrintInstrumentationReport();
 

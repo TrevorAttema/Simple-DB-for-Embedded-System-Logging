@@ -346,8 +346,6 @@ bool DBEngine::open(const char logFileName[MAX_FILENAME_LENGTH],
     return true;
 }
 
-#include <stdio.h>  // For printf
-
 // Prints database statistics: number of records, pages, records per page, and unique keys.
 void DBEngine::printStats(void) const {
     // _indexCount should have been set when loading the index header from disk.
@@ -397,6 +395,5 @@ void DBEngine::printStats(void) const {
     }
     printf("  Unique keys: %u\n", uniqueCount);
 }
-
 
 

@@ -1,16 +1,9 @@
 #include "DBEngine.h"
-#include "IFileHandler.h"
-#include "Instrumentation.h"   // New instrumentation header.
-#include <stdio.h>
-#include <string.h>
-#include <time.h>
-
 
 // Define our own MIN macro since STL is not permitted.
 #ifndef MIN
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #endif
-
 
 //
 // validateIndex()
@@ -636,5 +629,109 @@ bool DBEngine::loadIndex(void) {
     }
     DEBUG_PRINT("dbBuildIndex: _indexCount = %u\n", _indexCount);
     return result;
+}
+
+// Generic function: returns the first index entry for which:
+//    (entry.internal_status & mustBeSet) == mustBeSet   AND
+//    (entry.internal_status & mustBeClear) == 0
+//
+// If found, 'entry' is set to that entry and 'indexPosition' to its global index.
+bool DBEngine::getFirstMatchingIndexEntry(uint8_t mustBeSet, uint8_t mustBeClear,
+    IndexEntry& entry, uint32_t& indexPosition) const {
+    SCOPE_TIMER("DBEngine::getFirstMatchingIndexEntry");
+    DEBUG_PRINT("getFirstMatchingIndexEntry: Looking for first index entry matching (set: 0x%02X, clear: 0x%02X).\n",
+        mustBeSet, mustBeClear);
+
+    if (_indexCount == 0)
+        return false;
+
+    uint32_t totalPages = (_indexCount + MAX_INDEX_ENTRIES - 1) / MAX_INDEX_ENTRIES;
+    // Use const_cast to allow page loading (or mark caching members as mutable).
+    DBEngine* engine = const_cast<DBEngine*>(this);
+
+    // Instead of maintaining a separate counter, compute the page offset once.
+    for (uint32_t page = 0; page < totalPages; ++page) {
+        if (!engine->loadIndexPage(page)) {
+            DEBUG_PRINT("getFirstMatchingIndexEntry: Failed to load page %u.\n", page);
+            return false;
+        }
+        uint32_t pageOffset = page * MAX_INDEX_ENTRIES;
+        uint32_t entriesInPage = MIN(MAX_INDEX_ENTRIES, _indexCount - pageOffset);
+        for (uint32_t i = 0; i < entriesInPage; ++i) {
+            uint8_t status = engine->_indexPage[i].internal_status;
+            if (((status & mustBeSet) == mustBeSet) && ((status & mustBeClear) == 0)) {
+                entry = engine->_indexPage[i];
+                indexPosition = pageOffset + i;
+                DEBUG_PRINT("getFirstMatchingIndexEntry: Found matching entry at global index %u (key=%u).\n",
+                    indexPosition, entry.key);
+                return true;
+            }
+        }
+    }
+
+    DEBUG_PRINT("getFirstMatchingIndexEntry: No matching index entry found.\n");
+    return false;
+}
+
+// Convenience wrapper for fetching the first active index entry.
+// Active entries are defined as those with the deletion flag clear.
+bool DBEngine::getFirstActiveIndexEntry(IndexEntry& entry, uint32_t& indexPosition) const {
+    // Assuming INTERNAL_STATUS_DELETED (e.g., 0x01) is defined,
+    // an active record has the deletion flag clear.
+    return getFirstMatchingIndexEntry(0, INTERNAL_STATUS_DELETED, entry, indexPosition);
+}
+
+// Convenience wrapper for fetching the first deleted index entry.
+// Deleted entries are defined as those with the deletion flag set.
+bool DBEngine::getFirstDeletedIndexEntry(IndexEntry& entry, uint32_t& indexPosition) const {
+    return getFirstMatchingIndexEntry(INTERNAL_STATUS_DELETED, 0, entry, indexPosition);
+}
+
+// Returns the count of index entries whose internal_status
+// has all bits in 'internalStatus' set.
+// (No bits are required to be clear.)
+size_t DBEngine::recordCount(uint8_t internalStatus) const {
+    // Call the more general version with no "clear" bits.
+    return recordCount(internalStatus, 0);
+}
+
+// Returns the count of index entries for which:
+//   (entry.internal_status & mustBeSet) == mustBeSet   AND
+//   (entry.internal_status & mustBeClear) == 0
+//
+// This lets the caller count records that, for example, have the
+// deletion flag set, or records that do not have the deletion flag.
+size_t DBEngine::recordCount(uint8_t mustBeSet, uint8_t mustBeClear) const {
+    SCOPE_TIMER("DBEngine::recordCount");
+    size_t count = 0;
+
+    // We need to load pages even in a const method.
+    // Either mark members used for caching as 'mutable'
+    // or use const_cast.
+    DBEngine* engine = const_cast<DBEngine*>(this);
+
+    DEBUG_PRINT("recordCount: Scanning %u index entries for (set: 0x%02X, clear: 0x%02X).\n",
+        _indexCount, mustBeSet, mustBeClear);
+
+    // Compute the total number of pages that hold the index entries.
+    uint32_t totalPages = (_indexCount + MAX_INDEX_ENTRIES - 1) / MAX_INDEX_ENTRIES;
+    for (uint32_t page = 0; page < totalPages; ++page) {
+        if (!engine->loadIndexPage(page)) {
+            DEBUG_PRINT("recordCount: Failed to load page %u. Skipping...\n", page);
+            continue;
+        }
+        // Determine how many entries are in the current page.
+        uint32_t pageFirstIndex = page * MAX_INDEX_ENTRIES;
+        uint32_t entriesInPage = MIN(MAX_INDEX_ENTRIES, _indexCount - pageFirstIndex);
+        for (uint32_t i = 0; i < entriesInPage; ++i) {
+            uint8_t status = engine->_indexPage[i].internal_status;
+            // Check that all bits in 'mustBeSet' are set and none of the bits in 'mustBeClear' are set.
+            if (((status & mustBeSet) == mustBeSet) && ((status & mustBeClear) == 0))
+                ++count;
+        }
+    }
+    DEBUG_PRINT("recordCount: Found %zu matching records (set: 0x%02X, clear: 0x%02X).\n",
+        count, mustBeSet, mustBeClear);
+    return count;
 }
 

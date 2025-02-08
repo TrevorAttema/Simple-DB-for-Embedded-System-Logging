@@ -44,13 +44,22 @@ private:
 // Utility function to print a timing report.
 inline void PrintInstrumentationReport() {
     std::lock_guard<std::mutex> lock(gStatsMutex);
+
+    if (gFunctionStats.empty()) {
+        std::printf("Instrumentation report: No stats collected.\n");
+        return;
+    }
+
     std::printf("=== Instrumentation Timing Report ===\n");
     std::printf("%-40s %10s %15s %15s\n", "Function", "Calls", "Total Time (ms)", "Avg Time (ms)");
+
     for (const auto& pair : gFunctionStats) {
         const std::string& name = pair.first;
         const FunctionStats& stats = pair.second;
         double avg = stats.count ? stats.totalTimeMs / stats.count : 0.0;
         std::printf("%-40s %10u %15.3f %15.3f\n", name.c_str(), stats.count, stats.totalTimeMs, avg);
     }
+
     std::printf("=====================================\n");
 }
+
